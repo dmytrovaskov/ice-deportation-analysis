@@ -11,7 +11,6 @@ output:
 ---
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
-install.packages("caret")
 library(tidyverse)
 library(caret)
 library(MASS)
@@ -32,7 +31,7 @@ methods including Logistic Regression, Linear Discriminant Analysis, k-Nearest N
 **Target Variable:** `final_order_yes_no` (binary classification: YES vs NO)
 ```{r load-data}
 #Dataset:
-ice_data <- read.csv("C:/Users/Dmytro Vaskov/Downloads/arrests-latest.csv")
+ice_data <- read.csv("data/arrests-latest.csv")
 cat("Dataset dimensions:", dim(ice_data)[1], "rows,", dim(ice_data)[2], 
     "columns\n")
 head(ice_data, 5)
@@ -905,6 +904,7 @@ administrative system.
 **Course:** Big Data and Uncertainty Quantification  
 **University of Vienna**  
 **Date:** February 2026
+
 
 
 

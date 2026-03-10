@@ -1,0 +1,909 @@
+---
+title: "Big Data and Uncertainty Quantification - Classification Project"
+authors: "Dmytro Vaskov, Mariia Salivon"
+date: "2026-02-02"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    theme: flatly
+    code_folding: show
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+install.packages("caret")
+library(tidyverse)
+library(caret)
+library(MASS)
+library(class)
+library(rpart)
+library(pROC)
+library(knitr)
+library(dplyr)
+```
+
+# 1. Introduction and Dataset Selection
+This project analyzes ICE arrests data to predict whether cases result in a 
+final deportation order. We implement and compare multiple classification 
+methods including Logistic Regression, Linear Discriminant Analysis, k-Nearest Neighbors, and Classification Trees.
+
+**Dataset:** ICE Arrests, Detention and Deportation Data from Kaggle  
+**Source:** https://www.kaggle.com/datasets/bwandowando/ice-arrests-detention-and-deportation-data  
+**Target Variable:** `final_order_yes_no` (binary classification: YES vs NO)
+```{r load-data}
+#Dataset:
+ice_data <- read.csv("C:/Users/Dmytro Vaskov/Downloads/arrests-latest.csv")
+cat("Dataset dimensions:", dim(ice_data)[1], "rows,", dim(ice_data)[2], 
+    "columns\n")
+head(ice_data, 5)
+```
+
+# 2. Exploratory Data Analysis
+
+## 2.1 Target Variable Distribution
+```{r target-distribution}
+#Checking target variable with NA:
+table(ice_data$final_order_yes_no, useNA = "always")
+#Proportions:
+prop.table(table(ice_data$final_order_yes_no))
+#Target distribution without NA:
+ice_clean <- ice_data %>% 
+  filter(final_order_yes_no != "")
+nrow(ice_clean)
+
+ggplot(ice_clean, aes(x = final_order_yes_no, fill = final_order_yes_no)) +
+  geom_bar() +
+  geom_text(stat='count', aes(label=..count..), vjust=-0.5) +
+  labs(title = "Distribution of Final Order Status",
+       x = "Final Order",
+       y = "Count") +
+  theme_minimal() +
+  scale_fill_manual(values = c("NO" = "blue", "YES" = "red"))
+```
+**Findings:**
+- 9,372 observations (2.5% of the total observations) have missing target values
+and will be removed
+- After cleaning: 60.8% YES, 36.7% NO -> reasonably balanced classes
+- Total usable observations: 367,695
+
+## 2.2 Data Structure
+```{r predictor-overview}
+#Structure of key variables:
+ice_clean %>% 
+  dplyr::select(apprehension_state, gender, apprehension_criminality, 
+         citizenship_country, birth_year) %>% 
+  summary()
+
+#Checking missing values in key predictors:
+colSums(is.na(ice_clean)) %>% 
+  sort(decreasing = TRUE) %>% 
+  head(10)
+```
+**Findings:**
+- duplicate_likely:     3,621 missing  (should not be critical)
+- birth_year:               1 missing  (minimal)
+- All other variables:      0 missing  (no missing values -> great)
+## 2.3 Demographic Analysis
+```{r demographics}
+#Age variable
+ice_clean <- ice_clean %>%
+  mutate(
+    apprehension_year = as.numeric(format(as.Date(apprehension_date), "%Y")),
+    age = apprehension_year - birth_year
+  )
+summary(ice_clean$age)
+#Removing unrealistic ages
+ice_clean <- ice_clean %>%
+  filter(age >= 0 & age <= 115)
+
+#Age distribution
+ggplot(ice_clean, aes(x = age)) +
+  geom_histogram(bins = 50, fill = "blue", alpha = 0.7) +
+  labs(title = "Age Distribution of Arrested Individuals",
+       subtitle = "Age calculated at time of apprehension",
+       x = "Age",
+       y = "Count") +
+  theme_minimal()
+```
+**Findings:**
+- The distribution of age shows a right-skewed distribution with a peak at the
+age of approximately 30. 
+- The bell shape suggests the near normality, especially in the middle of the
+distribution. 
+- Very few cases for the people with the age below 20.
+- The right tail is extended on the right side, which indicates that either the 
+dataset is focused on the older group of people or that ICE enforcement 
+activities predominantly target the working-age population, likely reflecting 
+immigration and labor force demographics.
+- Overall the data seems to be well suited for the statistical modeling with 
+regressions and classifications, which assumes the normality of the predictors.
+
+## 2.4 Gender Distribution
+```{r gender-analysis}
+#Final order & gender:
+table(ice_clean$gender, ice_clean$final_order_yes_no)
+ggplot(ice_clean, aes(x = gender, fill = final_order_yes_no)) +
+  geom_bar(positions = "fill") +
+  labs(title = "Final Order by Gender",
+       x = "Gender",
+       y = "Final order") +
+  theme_minimal() +
+  scale_fill_manual(values = c("NO" = "blue", "YES" = "red"))
+```
+**Findings:**
+**Key Findings:**
+- The dataset is heavily skewed toward male arrests, with males representing
+approximately 85-90% of all cases, while females account for only 10-15%
+- This extreme gender imbalance reflects the demographics of immigration 
+enforcement, likely due to higher rates of male migration for labor-related 
+reasons. 
+- Very few cases have "Unknown" gender, indicating good data quality 
+for this variable. 
+- When examining the proportion plot, both males and females
+show similar proportions of final order outcomes. 
+- The fact that the blue-to-red ratio (NO vs YES) is consistent across both 
+Male and Female categories suggests that gender alone may not be a strong 
+discriminator for predicting final order status. The "Unknown" category is 
+negligible and can likely be removed or merged during preprocessing without
+significant impact
+
+**Implication for Modeling:**
+While gender should be included as a predictor for completeness, the similar 
+outcome proportions across gender categories suggest it may have low 
+individual predictive importance. However, it could still contribute to model 
+performance when combined with other predictors in multivariate models.
+
+## 2.5 Criminality Categories:
+``` {r criminality}
+table(ice_clean$apprehension_criminality)
+ggplot(ice_clean, aes(x = apprehension_criminality, fill = final_order_yes_no))+
+  geom_bar(position = "fill") +
+  labs(title = "Final Order by Criminality Category",
+       x = "Criminality Category",
+       y = "Proportion",
+       fill = "Final Order") +
+  theme_minimal() +
+  coord_flip() +
+  scale_fill_manual(values = c("NO" = "blue", "YES" = "red"))
+```
+
+**Key Findings:**
+- Criminality category is a strong predictor of final order outcomes, showing 
+clear and substantial differences across categories. 
+- Convicted criminals have the highest rate of final orders, indicating that 
+individuals with criminal convictions are most likely to receive deportation orders. 
+- Pending criminal charges show moderate final order rates, slightly below those
+with convictions but still above the overall average. 
+- Other immigration violators (no criminal background) have the lowest rate of
+final order, suggesting approximately equal chances of receiving or not receiving
+a final order. 
+- The likelihood of receiving a final order increases with criminal severity: 
+Other Immigration Violator < Pending Charges < Convicted Criminal
+- The large red area for "1 Convicted Criminal" shows this is the most decisive
+factor for deportation outcomes
+
+**Implication for Modeling:**
+Criminality category will likely be one of the most important predictors in our 
+classification models. The clear separation between categories suggests:
+- High discriminative power for all classification methods
+- This variable should contribute significantly to model accuracy
+- May be selected as a primary split variable in classification trees
+- Strong evidence for including this as a key predictor in logistic regression 
+and discriminant analysis models
+
+## 2.6 Top Citizenship Countries
+```{r citizenship}
+#Top 10 citizenship countries
+top_countries <- ice_clean %>%
+  count(citizenship_country, sort = TRUE) %>%
+  head(10)
+print(top_countries)
+
+ice_clean %>%
+  filter(citizenship_country %in% top_countries$citizenship_country) %>%
+  ggplot(aes(x = reorder(citizenship_country, citizenship_country, function(x) -length(x)), 
+             fill = final_order_yes_no)) +
+  geom_bar(position = "fill") +
+  labs(title = "Final Order Status by Top 10 Citizenship Countries",
+       x = "Country",
+       y = "Proportion",
+       fill = "Final Order") +
+  theme_minimal() +
+  coord_flip() +
+  scale_fill_manual(values = c("NO" = "blue", "YES" = "red"))
+```
+**Key Findings:**
+- Mexico dominates the dataset as the most represented country, which is 
+expected given geographical proximity to the United States. While most countries
+show 65-75% final order rates, there are notable differences:
+- Higher final order rates (~75-85%): Mexico, Guatemala, Honduras, El Salvador 
+(Central American countries)
+- Moderate rates (~60-70%): Venezuela, Nicaragua, Colombia, Cuba, Dominican Republic
+- Lower rates (~55-65%): Cuba, Ecuador (showing more balanced outcomes)
+  
+- Regional patterns emerge: Central American countries (Northern Triangle: 
+Guatemala, Honduras, El Salvador + Mexico) tend to have higher final order rates
+compared to South American and Caribbean nations.
+- Cuba and Nicaragua show relatively lower final order rates compared to Central
+American countries
+
+**Possible explanations for variation:**
+- Different bilateral agreements or immigration policies with specific countries
+- Geographic proximity and ease of deportation logistics
+- Varying rates of criminal involvement across nationalities
+- Different asylum claim success rates by country of origin
+- Political considerations in US-country relations
+
+**Implication for Modeling:**
+Citizenship country shows moderate predictive power with clear variation across
+countries. However, with many countries represented in the full dataset, we will
+need to:
+- Group less frequent countries into "Other" category during preprocessing
+- Consider this variable in multivariate models where it may interact with other predictors
+- Use this as a categorical predictor in all classification models
+
+# 3. Data Preprocessing
+## 3.1 Data Cleaning
+```{r data-cleaning}
+
+#Removing the row with missing birth_year
+ice_clean <- ice_clean %>%
+  filter(!is.na(age))
+ice_clean$final_order_yes_no <- factor(ice_clean$final_order_yes_no, 
+                                        levels = c("NO", "YES"))
+
+cat("Final dataset size:", nrow(ice_clean), "observations\n")
+cat("Target distribution:\n")
+table(ice_clean$final_order_yes_no)
+```
+## 3.2 Feature Selection
+```{r feature-selection}
+#Selecting relevant predictors for modeling (variables that are likely to predict
+#final order status)
+model_data <- ice_clean %>%
+  dplyr::select(
+    final_order_yes_no,
+    age,
+    gender,
+    citizenship_country,
+    apprehension_state,
+    apprehension_criminality,
+    apprehension_method,
+    case_category,
+    final_program
+  )
+
+#Handling empty strings
+model_data <- model_data %>%
+  mutate(
+    apprehension_state = ifelse(apprehension_state == "", "Unknown", apprehension_state),
+    citizenship_country = ifelse(citizenship_country == "", "Unknown", citizenship_country),
+    case_category = ifelse(case_category == "", "Unknown", case_category)
+  )
+
+model_data <- model_data %>%
+  mutate(across(where(is.character), as.factor))
+
+#Checking structure
+str(model_data)
+summary(model_data)
+```
+## 3.3 Handling High-Cardinality Variables
+```{r handle-cardinality}
+#Some variables have too many categories, we have grouped less frequent ones
+#into "Other"
+
+#Group rare categories
+group_rare_categories <- function(x, threshold = 0.01, other_label = "Other") {
+  freq <- prop.table(table(x))
+  rare <- names(freq[freq < threshold])
+  levels(x)[levels(x) %in% rare] <- other_label
+  return(x)
+}
+
+model_data <- model_data %>%
+  mutate(
+    citizenship_country = group_rare_categories(citizenship_country, threshold = 0.01),
+    apprehension_state = group_rare_categories(apprehension_state, threshold = 0.01),
+    case_category = group_rare_categories(case_category, threshold = 0.01)
+  )
+
+#New levels
+cat("Citizenship countries (grouped):", nlevels(model_data$citizenship_country), "\n")
+cat("Apprehension states (grouped):", nlevels(model_data$apprehension_state), "\n")
+cat("Case categories (grouped):", nlevels(model_data$case_category), "\n")
+```
+## 3.4 Train-Test Split
+```{r train-test-split}
+set.seed(123) 
+#Creating 70-30 split
+train_index <- createDataPartition(model_data$final_order_yes_no, 
+                                   p = 0.7, 
+                                   list = FALSE)
+
+train_data <- model_data[train_index, ]
+test_data <- model_data[-train_index, ]
+
+cat("Training set size:", nrow(train_data), "\n")
+cat("Test set size:", nrow(test_data), "\n")
+cat("\nTraining set target distribution:\n")
+prop.table(table(train_data$final_order_yes_no))
+cat("\nTest set target distribution:\n")
+prop.table(table(test_data$final_order_yes_no))
+```
+## 3.5 Data Standardization (for LDA, QDA, kNN)
+```{r standardization}
+# For methods that require standardized data (LDA, QDA, kNN)
+# We'll standardize the numeric predictor (age)
+train_data$age <- as.numeric(train_data$age)
+test_data$age <- as.numeric(test_data$age)
+
+#Mean and sd from training data
+age_mean <- mean(train_data$age, na.rm = TRUE)
+age_sd <- sd(train_data$age, na.rm = TRUE)
+
+#Copies for scaled versions
+train_data_scaled <- train_data
+test_data_scaled <- test_data
+
+# Standardizing
+train_data_scaled$age <- as.numeric((train_data$age - age_mean) / age_sd)
+test_data_scaled$age <- as.numeric((test_data$age - age_mean) / age_sd)
+
+#Verifying standartization
+cat("Training set:\n")
+cat("  Mean:", round(mean(train_data_scaled$age, na.rm = TRUE), 10), "\n")
+cat("  SD:", round(sd(train_data_scaled$age, na.rm = TRUE), 4), "\n\n")
+cat("Test set:\n")
+cat("  Mean:", round(mean(test_data_scaled$age, na.rm = TRUE), 4), "\n")
+cat("  SD:", round(sd(test_data_scaled$age, na.rm = TRUE), 4), "\n\n")
+
+cat("Training observations:", nrow(train_data_scaled), "\n")
+cat("Test observations:", nrow(test_data_scaled), "\n")
+```
+
+# 4. Model Implementation
+We will implement and compare six classification methods:
+1. Logistic Regression
+2. Linear Discriminant Analysis (LDA)
+3. Quadratic Discriminant Analysis (QDA)
+4. k-Nearest Neighbors (k-NN)
+5. Classification Tree (CART)
+6. Random Forest
+
+## 4.1 Logistic Regression
+```{r logistic-regression}
+#Logistic regression model
+logit_model <- glm(final_order_yes_no ~ ., 
+                   data = train_data, 
+                   family = binomial)
+
+
+#Predictions on test set
+logit_probs <- predict(logit_model, test_data, type = "response")
+logit_pred <- ifelse(logit_probs > 0.5, "YES", "NO")
+logit_pred <- factor(logit_pred, levels = c("NO", "YES"))
+
+# Confusion matrix
+logit_cm <- confusionMatrix(logit_pred, test_data$final_order_yes_no)
+print(logit_cm)
+
+logit_accuracy <- logit_cm$overall['Accuracy']
+```
+
+**Key Findings from Logistic Regression:**
+```{r logit-interpretation}
+#Significant predictors
+coef_summary <- summary(logit_model)$coefficients
+significant_vars <- coef_summary[coef_summary[,4] < 0.001, ]
+cat("\nMost significant predictors (p < 0.001):\n")
+print(head(significant_vars[order(abs(significant_vars[,3]), decreasing = TRUE), ], 10))
+```
+
+**Key Findings:**
+**The most influential categories are:**
+- Reinstated Final Order (z = 84.5): Cases with previously issued orders that are being reinstated have the highest likelihood of resulting in deportation.
+- Expedited Removal categories (z = 61.5): Cases processed through expedited 
+removal pathways show very high deportation likelihood, reflecting the 
+streamlined nature of these administrative processes.
+- Administrative Final Orders (z = 83.1, 62.4): Cases that already have administratively final orders show strong positive associations, as expected 
+since these represent completed enforcement actions.
+
+These findings suggest that administrative pathway and case processing type are
+the strongest determinants of the outcome.
+
+**Secondary influential categories:**
+Apprehension criminality shows highly significant effects, but interestingly with negative coefficients:
+- Other Immigration Violator (beta = -0.85, z = -32.7): Individuals with no criminal background are significantly LESS likely to receive final orders compared to
+convicted criminals (the reference category).
+- Pending Criminal Charges (beta = -0.47, z = -20.5): Those with pending charges 
+fall between convicted criminals and non-criminals in deportation likelihood.
+
+This pattern confirms our EDA findings: criminal conviction status is a major
+driver of deportation outcomes, with a clear hierarchy where convicted criminals
+face the highest deportation rates.
+
+
+```{r logit-interpretation}
+#Odds ratios for interpretation
+cat("\n\nOdds Ratios for Top Predictors:\n")
+odds_ratios <- exp(coef(logit_model))
+top_odds <- sort(odds_ratios[2:min(20, length(odds_ratios))], decreasing = TRUE)
+print(head(top_odds, 10))
+```
+**Key Findings:**
+The odds ratios reveal practical effect sizes:
+- Arkansas (OR = 1.96): Cases in Arkansas are nearly twice as likely to result 
+in deportation compared to the reference state, controlling for all other 
+factors.
+- Arizona (OR = 1.61) and California (OR = 1.52): Border states show elevated deportation odds, possibly reflecting proximity to removal infrastructure and enforcement priorities.
+- Nicaragua (OR = 1.32), Honduras (OR = 1.25), Guatemala (OR = 1.19): Certain nationalities face higher deportation odds, potentially due to diplomatic 
+agreements facilitating returns or lower asylum approval rates.
+- Gender effects are minimal (Male OR = 1.06, Unknown OR = 1.45): Gender shows
+weak effects once other factors are controlled, confirming it's not a primary
+driver.
+
+## 4.2 Linear Discriminant Analysis (LDA)
+```{r lda-model}
+# Fit LDA
+lda_model <- lda(final_order_yes_no ~ ., data = train_data_scaled)
+print(lda_model)
+
+#Predictions
+lda_pred <- predict(lda_model, test_data_scaled)
+lda_class <- lda_pred$class
+
+# Confusion matrix
+lda_cm <- confusionMatrix(lda_class, test_data_scaled$final_order_yes_no)
+print(lda_cm)
+
+lda_accuracy <- lda_cm$overall['Accuracy']
+
+cat("\nLDA Posterior Probability Summary:\n")
+summary(lda_pred$posterior[,2])
+```
+**Key Findings:**
+The LDA model achieves strong overall performance with 93.2% accuracy, 
+substantially outperforming the no-information-rate baseline (62.3%). 
+This demonstrates that linear discriminant analysis effectively separates the two 
+classes using linear decision boundaries.
+
+Key Performance Metrics:
+- Specificity (98.3%) is very high. The model correctly identifies "YES" cases 
+at a very high rate, with only 1,189 false negatives out of 68,759 actual 
+YES cases.
+- Sensitivity (84.8%) is also goof but lower. The model correctly identifies "NO"
+cases 85% of the time, but misclassifies 6,330 NO cases as YES.
+- Kappa (0.85) indicates excellent agreement beyond chance, confirming 
+the model's strong discriminative ability.
+
+Interpretation of the Trade-off:
+The model shows a bias toward predicting deportation (YES).
+This conservative approach means:
+- High confidence in deportation predictions (96.7% precision for YES 
+predictions)
+- Some non-deportation cases incorrectly flagged as deportations
+
+Posterior Probability Distribution:
+The posterior probabilities reveal strong bimodal separation:
+- Median posterior probability for YES class: 0.999 (extremely confident)
+- 1st Quartile: 0.0002 vs 3rd Quartile: 0.9995
+
+The linear discriminant function creates a clean decision boundary that
+separates the vast majority of cases decisively.
+
+
+## 4.3 Quadratic Discriminant Analysis (QDA)
+Quadratic Discriminant Analysis could not be fitted due to rank deficiency - 
+the high dimensionality of the predictor space (many categorical variables) 
+relative to sample sizes in certain groups makes separate covariance matrix 
+estimation infeasible. We proceed with LDA which assumes equal covariances 
+across groups.
+
+## 4.4 k-Nearest Neighbors (k-NN)
+k-NN was excluded from this analysis due to computational constraints.
+With 367,000+ observations and high-dimensional data (100+ features after 
+encoding categorical variables), k-NN becomes computationally prohibitive.
+The distance calculations required for k-NN scale poorly with both sample size 
+and dimensionality. We proceed with the remaining five classification methods.
+
+## 4.5 Classification Tree (CART)
+```{r cart-model}
+library(rpart.plot)
+
+#Fit classification tree
+tree_model <- rpart(final_order_yes_no ~ ., 
+                    data = train_data,
+                    method = "class",
+                    control = rpart.control(cp = 0.001))
+
+rpart.plot(tree_model, main = "Classification Tree for Final Order Prediction")
+
+print(tree_model)
+
+cat("\nVariable Importance:\n")
+print(tree_model$variable.importance)
+
+#Predictions
+tree_pred <- predict(tree_model, test_data, type = "class")
+
+#Confusion matrix
+tree_cm <- confusionMatrix(tree_pred, test_data$final_order_yes_no)
+print(tree_cm)
+
+tree_accuracy <- tree_cm$overall['Accuracy']
+
+#Pruning the tree using cross-validation
+plotcp(tree_model)
+cat("\nCross-validation results for tree complexity:\n")
+printcp(tree_model)
+
+#Optimal CP
+optimal_cp <- tree_model$cptable[which.min(tree_model$cptable[,"xerror"]),"CP"]
+cat("\nOptimal CP:", optimal_cp, "\n")
+
+#Pruning
+tree_pruned <- prune(tree_model, cp = optimal_cp)
+rpart.plot(tree_pruned, main = "Pruned Classification Tree")
+
+#Predictions with pruned tree
+tree_pruned_pred <- predict(tree_pruned, test_data, type = "class")
+tree_pruned_cm <- confusionMatrix(tree_pruned_pred, test_data$final_order_yes_no)
+print(tree_pruned_cm)
+
+tree_pruned_accuracy <- tree_pruned_cm$overall['Accuracy']
+```
+
+**Key Findings:**
+The tree confirms that case category dominates all other predictors, making it 
+the first and most important split. Administrative pathway determines outcome 
+more than individual characteristics. The pruned tree is virtually identical to
+the full tree, showing the model found a stable decision structure without 
+unnecessary complexity.
+
+## 4.6 Random Forest
+```{r random-forest}
+library(randomForest)
+
+#Fit Random Forest
+set.seed(123)
+rf_model <- randomForest(final_order_yes_no ~ ., 
+                         data = train_data,
+                         ntree = 100,
+                         mtry = sqrt(ncol(train_data) - 1),
+                         importance = TRUE)
+print(rf_model)
+varImpPlot(rf_model, main = "Variable Importance in Random Forest")
+
+#Importance scores
+importance_scores <- importance(rf_model)
+cat("\nTop 10 Most Important Variables:\n")
+print(importance_scores[order(importance_scores[,3], decreasing = TRUE)[1:10], ])
+
+#Predictions
+rf_pred <- predict(rf_model, test_data)
+
+#Confusion matrix
+rf_cm <- confusionMatrix(rf_pred, test_data$final_order_yes_no)
+print(rf_cm)
+
+rf_accuracy <- rf_cm$overall['Accuracy']
+
+# Plot error rate vs number of trees
+plot(rf_model, main = "Random Forest Error Rate vs Number of Trees")
+```
+**Key Findings:**
+**Variable Importance:**
+Case category is the supreme predictor by both metrics, confirming that 
+administrative processing pathway determines outcomes more than any individual characteristic. Criminality ranks high on Gini but lower on accuracy (less 
+unique information beyond case category). Demographics (age, gender) contribute 
+minimally, reinforcing that systemic/procedural factors outweigh personal 
+attributes.
+**Random Forest Error Rate vs Number of Trees:**
+The plot shows error rates stabilizing very quickly:
+- Black line (Overall Error ~6%): Total misclassification rate plateaus after 
+just ~50 trees
+- Red line (Class-specific Error ~2%): Error for one class stabilizes even faster
+- Green line (Class-specific Error ~14%): Error for the other class also 
+stabilizes early
+Key Insight: 
+Error rates converge by 50-100 trees and remain flat afterwards. This confirms 
+that 100 trees is sufficient.
+Thus, the Random Forest model is stable and not overfitting.
+
+# 5. Model Comparison
+## 5.1 Overall Performance Summary
+```{r model-comparison}
+#Comparison dataframe
+model_comparison <- data.frame(
+  Model = c("Logistic Regression", "LDA", 
+            "Classification Tree", "Pruned Tree", "Random Forest"),
+  Accuracy = c(logit_accuracy, lda_accuracy,
+               tree_accuracy, tree_pruned_accuracy, rf_accuracy),
+  Sensitivity = c(logit_cm$byClass['Sensitivity'],
+                  lda_cm$byClass['Sensitivity'],
+                  tree_cm$byClass['Sensitivity'],
+                  tree_pruned_cm$byClass['Sensitivity'],
+                  rf_cm$byClass['Sensitivity']),
+  Specificity = c(logit_cm$byClass['Specificity'],
+                  lda_cm$byClass['Specificity'],
+                  tree_cm$byClass['Specificity'],
+                  tree_pruned_cm$byClass['Specificity'],
+                  rf_cm$byClass['Specificity']),
+  F1_Score = c(logit_cm$byClass['F1'],
+               lda_cm$byClass['F1'],
+               tree_cm$byClass['F1'],
+               tree_pruned_cm$byClass['F1'],
+               rf_cm$byClass['F1'])
+)
+
+model_comparison[,2:5] <- round(model_comparison[,2:5], 4)
+kable(model_comparison, 
+      caption = "Performance Comparison of Classification Models",
+      align = 'lcccc')
+
+#Best model by each metric:
+cat("\nBest Model by Metric:\n")
+cat("Accuracy:", model_comparison$Model[which.max(model_comparison$Accuracy)], 
+    "(", max(model_comparison$Accuracy), ")\n")
+cat("Sensitivity:", model_comparison$Model[which.max(model_comparison$Sensitivity)], 
+    "(", max(model_comparison$Sensitivity), ")\n")
+cat("Specificity:", model_comparison$Model[which.max(model_comparison$Specificity)], 
+    "(", max(model_comparison$Specificity), ")\n")
+cat("F1 Score:", model_comparison$Model[which.max(model_comparison$F1_Score)], 
+    "(", max(model_comparison$F1_Score), ")\n")
+```
+**Key Findings:**
+Random Forest is the overall winner with highest accuracy (93.6%), sensitivity 
+(84.9%), and F1 score (90.9%). Classification Tree achieved best specificity 
+(99.3%) but lower overall accuracy. Logistic Regression and LDA both performed 
+well (~93%) with better interpretability.
+
+## 5.2 Accuracy Comparison Visualization
+```{r accuracy-plot}
+#Bar plot of accuracy
+ggplot(model_comparison, aes(x = reorder(Model, Accuracy), y = Accuracy, fill = Model)) +
+  geom_bar(stat = "identity", show.legend = FALSE) +
+  geom_text(aes(label = round(Accuracy, 4)), hjust = -0.1, size = 3.5) +
+  coord_flip() +
+  ylim(0, 1) +
+  labs(title = "Model Accuracy Comparison",
+       x = "Model",
+       y = "Accuracy") +
+  theme_minimal() +
+  theme(axis.text.y = element_text(size = 10))
+```
+
+## 5.3 Sensitivity vs Specificity Trade-off
+```{r sens-spec-plot}
+#Scatter plot showing sensitivity-specificity trade-off
+ggplot(model_comparison, aes(x = Specificity, y = Sensitivity, color = Model)) +
+  geom_point(size = 4) +
+  geom_text(aes(label = Model), vjust = -1, size = 3) +
+  xlim(0, 1) +
+  ylim(0, 1) +
+  geom_abline(intercept = 0, slope = 1, linetype = "dashed", color = "gray") +
+  labs(title = "Sensitivity vs Specificity Trade-off",
+       subtitle = "Points closer to top-right corner are better",
+       x = "Specificity (True Negative Rate)",
+       y = "Sensitivity (True Positive Rate)") +
+  theme_minimal()
+```
+**Key Findings:**
+All five models cluster tightly in the top-right corner (high sensitivity ~85%,
+very high specificity ~98-99%), indicating excellent overall performance with 
+minimal trade-offs.
+Key Observations:
+- All models are nearly overlapping. They achieve very similar 
+sensitivity-specificity balance.
+The clustering shows that different modeling approaches converge on the same performance region, suggesting the data has clear separability between classes.
+No model sacrifices one metric for the other. All achieve both high sensitivity
+and specificity simultaneously, which is ideal for this classification problem.
+
+
+## 5.4 Confusion Matrices Comparison
+```{r confusion-matrices}
+#Visual comparison of confusion matrices for top 3 models
+plot_confusion_matrix <- function(cm, title) {
+  cm_table <- as.data.frame(cm$table)
+  ggplot(cm_table, aes(x = Reference, y = Prediction, fill = Freq)) +
+    geom_tile() +
+    geom_text(aes(label = Freq), size = 6) +
+    scale_fill_gradient(low = "white", high = "steelblue") +
+    labs(title = title,
+         x = "Actual",
+         y = "Predicted") +
+    theme_minimal() +
+    theme(legend.position = "none")
+}
+
+#Confusion matrices for best models
+library(gridExtra)
+p1 <- plot_confusion_matrix(rf_cm, "Random Forest")
+p2 <- plot_confusion_matrix(logit_cm, "Logistic Regression")
+p3 <- plot_confusion_matrix(lda_cm, "LDA")
+p4 <- plot_confusion_matrix(tree_pruned_cm, "Pruned Tree")
+
+grid.arrange(p1, p2, p3, p4, ncol = 2)
+```
+**Key Findings:**
+All four models show strong performance with similar error patterns:
+- Random Forest: Most balanced errors (6,284 false positives, 
+744 false negatives) -> best overall
+- Logistic Regression: Slightly more false positives (6,605) and more false 
+negatives (880) -> still strong
+- LDA: Highest false positives (6,330) but fewer false negatives (1,189)
+- Pruned Tree: Highest false positives (6,716) but lowest false 
+negatives (454) -> most conservative, strongly biased toward predicting YES
+Pattern: All models make more false positive errors than false negatives. This conservative bias means they're better at catching actual deportation cases but sometimes over-predict deportations.
+Winner: Random Forest has the best balance with fewest total errors.
+
+## 5.5 Statistical Significance Testing
+```{r mcnemar-test}
+#McNemar's test to compare models
+#Random Forest vs Logistic Regression
+rf_correct <- (rf_pred == test_data$final_order_yes_no)
+logit_correct <- (logit_pred == test_data$final_order_yes_no)
+
+contingency <- table(rf_correct, logit_correct)
+cat("\nContingency Table: Random Forest vs Logistic Regression\n")
+print(contingency)
+
+mcnemar_result <- mcnemar.test(contingency)
+cat("\nMcNemar's Test Result:\n")
+print(mcnemar_result)
+
+if(mcnemar_result$p.value < 0.05) {
+  cat("\nConclusion: The difference in performance between Random Forest and Logistic Regression is statistically significant (p < 0.05)\n")
+} else {
+  cat("\nConclusion: No statistically significant difference between Random Forest and Logistic Regression (p >= 0.05)\n")
+}
+```
+
+
+# 6. Conclusion
+## 6.1 Summary of Findings
+This project successfully applied multiple advanced classification techniques 
+to predict final deportation order outcomes using ICE arrest data. 
+Through systematic exploratory data analysis, preprocessing, and model 
+implementation, we achieved high predictive accuracy while gaining valuable 
+insights into the factors that influence deportation decisions.
+### Dataset Characteristics
+The ICE arrests dataset provided a robust foundation for classification 
+modeling with 367,695 usable observations after cleaning. The target variable 
+(final deportation order: YES/NO) showed reasonable class balance 
+(62% YES, 38% NO), which facilitated effective model training.
+The dataset exhibited high quality with minimal missing values, though 
+approximately 15% of observations had unknown apprehension states.
+### Key Predictive Variables
+**Strong Predictors:**
+- Case category is the supreme predictor, demonstrating that administrative 
+processing pathways determine outcomes more strongly than individual 
+characteristics.
+- Criminality status showed the clearest gradient: convicted criminals
+had ~85-90% deportation rates, pending charges ~65-70%, and other immigration
+violators ~50-55%, confirming criminal history as a decisive factor.
+
+**Moderate Predictors:**
+- Citizenship country exhibited variation across nations, with Central 
+American countries (Mexico, Guatemala, Honduras) showing higher deportation 
+rates (75-85%) compared to South American and Caribbean nations (55-70%).
+- Age followed a right-skewed distribution peaking at 30-35 years, with 
+approximate normality supporting parametric modeling assumptions.
+
+**Weak Predictors:**
+- Gender showed minimal predictive power, with similar outcome proportions 
+across male and female categories despite the dataset's 85% male composition
+
+### Model Performance Comparison
+
+We implemented and compared five classification methods, each offering unique strengths:
+
+**Random Forest (Best Overall Performance):**
+- Accuracy: 93.6%
+- Sensitivity: 84.9% 
+- Specificity: 98.7%
+- F1 Score: 90.9%
+- Random Forest achieved the highest accuracy and best balance between 
+sensitivity and specificity. Variable importance analysis confirmed case 
+category as the dominant predictor, with criminality as a strong secondary 
+factor. The error rate stabilization plot showed convergence after just 
+50-100 trees, validating our choice of 100 trees and demonstrating efficient 
+learning without overfitting.
+
+**Logistic Regression (Best Interpretability):**
+- Accuracy: 93.2%
+- Sensitivity: 82.5%
+- Specificity: 98.4%
+- F1 Score: 89.8%
+- Logistic regression provided strong performance with the added benefit of 
+coefficient interpretability. This model is ideal to understand the magnitude 
+and direction of predictor effects on deportation likelihood.
+
+**Linear Discriminant Analysis (LDA):**
+- Accuracy: 93.0%
+- Sensitivity: 79.8%
+- Specificity: 98.3%
+- F1 Score: 88.5%
+- LDA performed comparably to logistic regression while making explicit 
+normality assumptions. The age distribution's approximate normality validated 
+this approach, though categorical predictors dominated performance.
+
+**Classification Trees:**
+- Unpruned Accuracy: 93.2%
+- Pruned Accuracy: 93.4%
+- Best Specificity: 99.3%
+- Pruning slightly improved performance while reducing model complexity. 
+Trees excel at capturing non-linear relationships and interactions, though 
+they exhibited the most conservative bias toward predicting deportations.
+
+**Models Excluded:**
+- Quadratic Discriminant Analysis (QDA) failed due to rank deficiency in 
+the covariance matrices, likely caused by high-cardinality categorical 
+predictors with sparse combinations
+- k-Nearest Neighbors (kNN) was computationally prohibitive given the 
+dataset size (367k observations).
+
+### Model Selection Insights
+The McNemar's test comparing Random Forest and Logistic Regression revealed
+whether their performance differences were statistically significant. 
+If significant (p < 0.05), Random Forest's superiority is confirmed; if not, the simpler logistic model may be preferable for interpretability.
+
+**Conservative Prediction Bias:** All models exhibited higher false positive 
+rates than false negative rates.
+
+### Limitations and Considerations
+
+**Data Limitations:**
+- 15% of observations had unknown apprehension states, potentially introducing
+bias if missingness is non-random.
+- High-cardinality variables (citizenship country, case category) required 
+grouping rare categories, potentially losing granular information
+- Single numeric predictor (age) limited the benefit of methods requiring
+continuous features.
+**Temporal Considerations:**
+- Data spans 2023-2025, capturing recent policy environments but limiting 
+historical perspective.
+- Model performance may degrade if immigration policies shift significantly 
+after this period.
+
+## 6.2 Final Remarks
+
+This project successfully demonstrated the application of multiple 
+classification techniques to a complex, real-world policy problem. By achieving
+93%+ accuracy across diverse modeling approaches, we confirmed that immigration 
+case outcomes are highly predictable based on observable case and individual characteristics.
+The dominance of case category and criminality status as predictors reveals that deportation decisions are primarily driven by administrative processing pathways
+and criminal history rather than demographic factors like age, gender, or even citizenship country. This finding has important implications for both policy 
+design and individual case advocacy.
+
+**Critical points:**
+It is crucial to emphasize that these conclusions are based on a specific
+dataset that may not provide a complete or objective representation of ICE 
+enforcement activities. 
+Several concerning patterns suggest potential data collection biases or 
+selective reporting:
+
+**Anomalous Age-Criminality Patterns:**
+Our analysis revealed individuals classified with criminal records at 
+implausibly young ages, including minors. This raises questions about data 
+quality, classification accuracy, or the definitions used for "criminal records"
+(which might include juvenile offenses, family members' records, or data entry errors).
+
+**Potential Selection Bias:**
+The dataset represents only cases that resulted in formal ICE processing and documentation. Critically, it likely excludes:
+- Individuals apprehended but immediately released without formal case 
+processing.
+- Cases settled through alternative mechanisms not captured in this 
+administrative system.
+- Enforcement actions that occurred but were not formally documented.
+- Detentions at facilities that do not contribute to this dataset.
+
+---
+
+**Project completed by:** Dmytro Vaskov, Mariia Salivon  
+**Course:** Big Data and Uncertainty Quantification  
+**University of Vienna**  
+**Date:** February 2026
+
+

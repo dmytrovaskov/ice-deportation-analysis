@@ -14,3 +14,4 @@ My contributions included:
 The dataset used in this project comes from Kaggle:
 **Dataset:** ICE Arrests, Detention and Deportation Data from Kaggle  
 **Source:** https://www.kaggle.com/datasets/bwandowando/ice-arrests-detention-and-deportation-data  
+**Please download the dataset and place the file "arrests-latest.csv" in the `data/` folder before running the analysis**
